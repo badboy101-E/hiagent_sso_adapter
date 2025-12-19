@@ -1,0 +1,11 @@
+# 身份中台SDK
+cqhyxk>=1.0.0
+
+# 数据库连接
+psycopg2-binary>=2.9.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+
+

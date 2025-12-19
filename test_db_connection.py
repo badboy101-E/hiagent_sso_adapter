@@ -18,7 +18,7 @@ def test_connection():
         "host": os.getenv('TMP_DB_HOST', 'localhost'),
         "port": int(os.getenv('TMP_DB_PORT', '5432')),
         "database": os.getenv('TMP_DB_NAME', 'postgres'),
-        "user": os.getenv('TMP_DB_USER', 'pguser'),
+        "user": os.getenv('TMP_DB_USER', 'your_db_user'),
         "password": os.getenv('TMP_DB_PASSWORD', '')
     }
     

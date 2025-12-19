@@ -101,15 +101,13 @@ CREATE TABLE IF NOT EXISTS tmp_org_user_relation (
 
 ## 快速开始
 
-**已配置数据库**: 10.10.161.44:5432 (pguser)
-
 详细步骤请参考：[快速开始.md](./快速开始.md)
 
 ### 快速配置
 
 1. 复制配置文件：`cp env.example .env`
-2. 修改租户ID：编辑 `.env` 文件中的 `TENANT_ID`
-3. 创建临时表：`psql -h 10.10.161.44 -p 5432 -U pguser -d postgres -f init_tables.sql`
+2. 修改配置：编辑 `.env` 文件，填入实际的API密钥、数据库配置和租户ID
+3. 创建临时表：`psql -h your_db_host -p 5432 -U your_db_user -d postgres -f init_tables.sql`
 4. 测试连接：`python test_db_connection.py`
 5. 运行同步：`python sync_org_from_idc.py`
 

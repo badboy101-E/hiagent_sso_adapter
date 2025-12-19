@@ -421,9 +421,17 @@ class OrgSyncFromIDC:
             # 方案2: 从用户身份信息中提取组织信息（备用方案）
             logger.info("从用户身份信息中提取组织信息...")
             users = self.get_all_users_from_idc()
+            
+            if not users:
+                logger.warning("没有获取到用户数据，无法提取组织信息")
+                return organizations
+            
+            logger.info(f"开始从 {len(users)} 个用户中提取组织信息...")
             org_set = set()
+            processed_count = 0
             
             for user in users:
+                processed_count += 1
                 # 从用户信息中提取组织信息（根据API文档）
                 # API返回：orgList（所属组织信息数组）和 mainOrg（主组织）
                 # orgList内字段：orgId（组织编码）、orgName（组织名称）、sourceOrgId（组织原编码）
@@ -444,10 +452,13 @@ class OrgSyncFromIDC:
                                 'org_code': org_id,
                                 'pid': ''  # 主组织的父组织ID需要从其他接口获取
                             })
+                            logger.debug(f"添加主组织: {org_id} - {org_name}")
+                else:
+                    logger.debug(f"用户 {get_attr(user, 'sourceUserId')} 没有主组织信息")
                 
                 # 提取orgList中的所有组织信息（orgList是OrgInfo对象列表）
                 org_list = get_attr(user, 'orgList') or []
-                if isinstance(org_list, list):
+                if isinstance(org_list, list) and len(org_list) > 0:
                     for org in org_list:
                         org_id = str(get_attr(org, 'orgId') or get_attr(org, 'sourceOrgId') or '')
                         org_name = str(get_attr(org, 'orgName') or '')
@@ -462,8 +473,15 @@ class OrgSyncFromIDC:
                                     'org_code': org_id,
                                     'pid': ''  # 需要从组织架构接口获取父组织ID
                                 })
+                                logger.debug(f"添加组织: {org_id} - {org_name}")
+                else:
+                    logger.debug(f"用户 {get_attr(user, 'sourceUserId')} 的orgList为空或不是列表")
+                
+                # 每处理100个用户输出一次进度
+                if processed_count % 100 == 0:
+                    logger.info(f"已处理 {processed_count}/{len(users)} 个用户，提取到 {len(organizations)} 个组织...")
             
-            logger.info(f"从用户信息中提取到 {len(organizations)} 个组织")
+            logger.info(f"从 {len(users)} 个用户信息中提取到 {len(organizations)} 个组织")
             
         except Exception as e:
             logger.error(f"获取组织架构信息失败: {e}")
@@ -477,13 +495,14 @@ class OrgSyncFromIDC:
             logger.warning("没有组织数据需要同步")
             return
         
+        logger.info(f"开始同步 {len(organizations)} 个组织到临时表...")
         conn = self.get_db_connection()
         try:
             cur = conn.cursor()
             success_count = 0
             error_count = 0
             
-            for org_data in organizations:
+            for idx, org_data in enumerate(organizations, 1):
                 try:
                     # 确保正确提取组织信息
                     org_id = str(org_data.get('id') if isinstance(org_data, dict) else get_attr(org_data, 'id') or '')
@@ -504,36 +523,59 @@ class OrgSyncFromIDC:
                         logger.warning(f"组织 {org_id} 的orgName为空，使用org_id作为名称")
                     
                     # 插入或更新组织表（name字段存储orgName）
-                    cur.execute("""
-                        INSERT INTO tmp_organization
-                            (id, name, org_code, tenant_id, pid, is_deleted, updated_time)
-                        VALUES (%s, %s, %s, %s, %s, 0, NOW())
-                        ON CONFLICT (tenant_id, org_code)
-                        DO UPDATE SET
-                            name = EXCLUDED.name,
-                            pid = EXCLUDED.pid,
-                            is_deleted = 0,
-                            updated_time = NOW()
-                    """, (
-                        org_id,
-                        org_name,  # 这里写入的是orgName
-                        org_code,
-                        self.tenant_id,
-                        pid
-                    ))
-                    
-                    success_count += 1
+                    try:
+                        cur.execute("""
+                            INSERT INTO tmp_organization
+                                (id, name, org_code, tenant_id, pid, is_deleted, updated_time)
+                            VALUES (%s, %s, %s, %s, %s, 0, NOW())
+                            ON CONFLICT (tenant_id, org_code)
+                            DO UPDATE SET
+                                name = EXCLUDED.name,
+                                pid = EXCLUDED.pid,
+                                is_deleted = 0,
+                                updated_time = NOW()
+                        """, (
+                            org_id,
+                            org_name,  # 这里写入的是orgName
+                            org_code,
+                            self.tenant_id,
+                            pid
+                        ))
+                        success_count += 1
+                        
+                        # 每处理50个组织输出一次进度
+                        if idx % 50 == 0:
+                            logger.info(f"已同步 {idx}/{len(organizations)} 个组织...")
+                    except Exception as db_error:
+                        logger.error(f"插入组织数据失败 (org_id={org_id}, org_name={org_name}): {db_error}", exc_info=True)
+                        error_count += 1
+                        # 不抛出异常，继续处理下一个组织
+                        continue
                     
                 except Exception as e:
-                    logger.error(f"同步组织失败 {org_data}: {e}")
+                    logger.error(f"同步组织失败 {org_data}: {e}", exc_info=True)
                     error_count += 1
+                    continue
             
             conn.commit()
             logger.info(f"组织同步完成 - 成功: {success_count}, 失败: {error_count}")
             
+            if success_count == 0 and error_count > 0:
+                logger.error(f"所有组织同步都失败了！请检查日志了解详情。")
+                logger.error("可能的原因：")
+                logger.error("1. 数据库连接问题")
+                logger.error("2. 表结构不匹配")
+                logger.error("3. 数据格式问题")
+                raise Exception(f"组织同步失败：成功 {success_count}，失败 {error_count}")
+            
+            # 验证数据是否真的写入了
+            cur.execute("SELECT COUNT(*) FROM tmp_organization WHERE tenant_id = %s", (self.tenant_id,))
+            actual_count = cur.fetchone()[0]
+            logger.info(f"验证：数据库中实际有 {actual_count} 条组织记录（租户ID: {self.tenant_id}）")
+            
         except Exception as e:
             conn.rollback()
-            logger.error(f"组织同步过程出错: {e}")
+            logger.error(f"组织同步过程出错: {e}", exc_info=True)
             raise
         finally:
             conn.close()
@@ -691,10 +733,31 @@ class OrgSyncFromIDC:
             logger.info("\n[3/5] 从身份中台获取组织架构信息...")
             organizations = self.get_organizations_from_idc()
             
+            if not organizations:
+                logger.error("未获取到任何组织数据！")
+                logger.error("可能的原因：")
+                logger.error("1. 用户数据中没有组织信息（mainOrg和orgList都为空）")
+                logger.error("2. 组织提取逻辑有问题")
+                logger.error("3. 如果使用了FILTER_ORG_NAMES，可能过滤后没有匹配的组织")
+                logger.error("4. 用户数据为空，无法提取组织信息")
+                # 打印一些调试信息
+                if users:
+                    sample_user = users[0] if len(users) > 0 else None
+                    if sample_user:
+                        logger.info(f"示例用户数据结构: sourceUserId={get_attr(sample_user, 'sourceUserId')}")
+                        logger.info(f"示例用户 mainOrg: {get_attr(sample_user, 'mainOrg')}")
+                        logger.info(f"示例用户 orgList: {get_attr(sample_user, 'orgList')}")
+                raise Exception("未获取到组织数据，无法继续同步")
+            
+            logger.info(f"成功获取到 {len(organizations)} 个组织")
+            # 打印前几个组织的信息用于调试
+            if len(organizations) > 0:
+                logger.info(f"前3个组织示例: {organizations[:3]}")
+            
             # 4. 同步组织
             logger.info("\n[4/5] 同步组织到临时表...")
             self.sync_organizations(organizations)
-            active_org_ids = [str(get_attr(o, 'id', '') or '') for o in organizations if get_attr(o, 'id')]
+            active_org_ids = [str(o.get('id') if isinstance(o, dict) else get_attr(o, 'id', '') or '') for o in organizations if (o.get('id') if isinstance(o, dict) else get_attr(o, 'id'))]
             
             # 5. 同步用户-组织关系
             logger.info("\n[5/5] 同步用户-组织关系到临时表...")

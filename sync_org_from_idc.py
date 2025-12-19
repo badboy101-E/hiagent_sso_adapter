@@ -63,8 +63,13 @@ def get_value(obj, default=None):
 class OrgSyncFromIDC:
     """从身份中台同步组织架构信息到临时数据库"""
     
-    def __init__(self):
-        """初始化配置"""
+    def __init__(self, filter_org_names=None):
+        """
+        初始化配置
+        
+        Args:
+            filter_org_names: 要过滤的组织名称列表，如果指定则只同步这些组织的用户
+        """
         # 身份中台配置（从环境变量读取）
         self.idc_client = CqhyxkClient()
         
@@ -72,6 +77,19 @@ class OrgSyncFromIDC:
         self.tenant_id = os.getenv('TENANT_ID', '0')
         if self.tenant_id == '0':
             logger.warning("警告: TENANT_ID 未设置，使用默认值 '0'")
+        
+        # 组织名称过滤（从环境变量读取或参数传入）
+        if filter_org_names is None:
+            org_names_str = os.getenv('FILTER_ORG_NAMES', '')
+            if org_names_str:
+                self.filter_org_names = [name.strip() for name in org_names_str.split(',') if name.strip()]
+            else:
+                self.filter_org_names = []
+        else:
+            self.filter_org_names = filter_org_names if isinstance(filter_org_names, list) else [filter_org_names]
+        
+        if self.filter_org_names:
+            logger.info(f"组织名称过滤已启用: {self.filter_org_names}")
         
         # 临时数据库配置
         self.tmp_db_config = {
@@ -84,6 +102,40 @@ class OrgSyncFromIDC:
         
         logger.info(f"初始化完成 - 租户ID: {self.tenant_id}")
         logger.info(f"临时数据库: {self.tmp_db_config['host']}:{self.tmp_db_config['port']}/{self.tmp_db_config['database']}")
+    
+    def _filter_users_by_org_name(self, users):
+        """
+        根据组织名称过滤用户
+        
+        Args:
+            users: 用户列表
+            
+        Returns:
+            过滤后的用户列表（用户的主组织或任一组织在过滤列表中）
+        """
+        if not self.filter_org_names:
+            return users
+        
+        filtered_users = []
+        for user in users:
+            # 检查主组织
+            main_org = get_attr(user, 'mainOrg')
+            if main_org:
+                org_name = str(get_attr(main_org, 'orgName') or '')
+                if org_name in self.filter_org_names:
+                    filtered_users.append(user)
+                    continue
+            
+            # 检查orgList中的所有组织
+            org_list = get_attr(user, 'orgList') or []
+            if isinstance(org_list, list):
+                for org in org_list:
+                    org_name = str(get_attr(org, 'orgName') or '')
+                    if org_name in self.filter_org_names:
+                        filtered_users.append(user)
+                        break
+        
+        return filtered_users
     
     def get_db_connection(self):
         """获取数据库连接"""
@@ -151,8 +203,14 @@ class OrgSyncFromIDC:
                 current_page += 1
             
             if users:
-                logger.info(f"方案1成功！总共获取到 {len(users)} 个用户")
-                return users
+                # 如果配置了组织名称过滤，进行过滤
+                if self.filter_org_names:
+                    filtered_users = self._filter_users_by_org_name(users)
+                    logger.info(f"方案1成功！获取到 {len(users)} 个用户，过滤后 {len(filtered_users)} 个用户（组织: {self.filter_org_names}）")
+                    return filtered_users
+                else:
+                    logger.info(f"方案1成功！总共获取到 {len(users)} 个用户")
+                    return users
             else:
                 logger.warning("方案1未获取到数据，尝试其他方案...")
         except Exception as e:
@@ -203,8 +261,14 @@ class OrgSyncFromIDC:
                         continue
                 
                 if users:
-                    logger.info(f"方案3成功！总共获取到 {len(users)} 个用户")
-                    return users
+                    # 如果配置了组织名称过滤，进行过滤
+                    if self.filter_org_names:
+                        filtered_users = self._filter_users_by_org_name(users)
+                        logger.info(f"方案3成功！获取到 {len(users)} 个用户，过滤后 {len(filtered_users)} 个用户（组织: {self.filter_org_names}）")
+                        return filtered_users
+                    else:
+                        logger.info(f"方案3成功！总共获取到 {len(users)} 个用户")
+                        return users
             except Exception as e:
                 logger.warning(f"方案3失败: {e}")
         
@@ -219,11 +283,19 @@ class OrgSyncFromIDC:
                     sourceUserId=sample_user_id
                 )
                 response = self.idc_client.get_identity_list(request)
-                if response and response.data and response.data.content:
-                    users = response.data.content
-                    logger.warning(f"方案4: 使用示例用户ID获取到 {len(users)} 个用户（仅用于测试）")
-                    logger.warning("提示: 如需获取所有用户，请配置 USER_ID_LIST 或联系身份中台提供批量查询API")
-                    return users
+                if response and response.data:
+                    page_users = get_attr(response.data, 'content') or []
+                    if page_users:
+                        users = page_users
+                        # 如果配置了组织名称过滤，进行过滤
+                        if self.filter_org_names:
+                            filtered_users = self._filter_users_by_org_name(users)
+                            logger.warning(f"方案4: 使用示例用户ID获取到 {len(users)} 个用户，过滤后 {len(filtered_users)} 个用户（组织: {self.filter_org_names}）")
+                            return filtered_users if filtered_users else users
+                        else:
+                            logger.warning(f"方案4: 使用示例用户ID获取到 {len(users)} 个用户（仅用于测试）")
+                            logger.warning("提示: 如需获取所有用户，请配置 USER_ID_LIST 或联系身份中台提供批量查询API")
+                            return users
             except Exception as e:
                 logger.error(f"方案4也失败: {e}")
         
@@ -367,7 +439,8 @@ class OrgSyncFromIDC:
                             org_set.add(org_key)
                             organizations.append({
                                 'id': org_id,
-                                'name': org_name or org_id,
+                                'name': org_name or org_id,  # 确保orgName被正确存储到name字段
+                                'orgName': org_name,  # 同时保存原始orgName
                                 'org_code': org_id,
                                 'pid': ''  # 主组织的父组织ID需要从其他接口获取
                             })
@@ -384,7 +457,8 @@ class OrgSyncFromIDC:
                                 org_set.add(org_key)
                                 organizations.append({
                                     'id': org_id,
-                                    'name': org_name or org_id,
+                                    'name': org_name or org_id,  # 确保orgName被正确存储到name字段
+                                    'orgName': org_name,  # 同时保存原始orgName
                                     'org_code': org_id,
                                     'pid': ''  # 需要从组织架构接口获取父组织ID
                                 })
@@ -411,17 +485,25 @@ class OrgSyncFromIDC:
             
             for org_data in organizations:
                 try:
-                    org_id = str(org_data.get('id') or '')
-                    org_name = org_data.get('name') or ''
-                    org_code = org_data.get('org_code') or org_id
-                    pid = str(org_data.get('pid') or '')
+                    # 确保正确提取组织信息
+                    org_id = str(org_data.get('id') if isinstance(org_data, dict) else get_attr(org_data, 'id') or '')
+                    # 优先使用orgName，如果没有则使用name
+                    org_name = str(org_data.get('name') if isinstance(org_data, dict) else get_attr(org_data, 'name') or 
+                                  org_data.get('orgName') if isinstance(org_data, dict) else get_attr(org_data, 'orgName') or '')
+                    org_code = str(org_data.get('org_code') if isinstance(org_data, dict) else get_attr(org_data, 'org_code') or org_id)
+                    pid = str(org_data.get('pid') if isinstance(org_data, dict) else get_attr(org_data, 'pid') or '')
                     
                     if not org_id:
                         logger.warning(f"跳过无效组织数据: {org_data}")
                         error_count += 1
                         continue
                     
-                    # 插入或更新组织表
+                    # 确保orgName不为空，如果为空则使用org_id
+                    if not org_name:
+                        org_name = org_id
+                        logger.warning(f"组织 {org_id} 的orgName为空，使用org_id作为名称")
+                    
+                    # 插入或更新组织表（name字段存储orgName）
                     cur.execute("""
                         INSERT INTO tmp_organization
                             (id, name, org_code, tenant_id, pid, is_deleted, updated_time)
@@ -434,7 +516,7 @@ class OrgSyncFromIDC:
                             updated_time = NOW()
                     """, (
                         org_id,
-                        org_name,
+                        org_name,  # 这里写入的是orgName
                         org_code,
                         self.tenant_id,
                         pid
@@ -634,8 +716,24 @@ class OrgSyncFromIDC:
 
 def main():
     """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='从身份中台同步组织架构信息到临时数据库')
+    parser.add_argument(
+        '--filter-org-names',
+        type=str,
+        help='要过滤的组织名称列表（逗号分隔），例如：--filter-org-names "信息技术中心,计算机学院"'
+    )
+    
+    args = parser.parse_args()
+    
+    # 解析组织名称列表
+    filter_org_names = None
+    if args.filter_org_names:
+        filter_org_names = [name.strip() for name in args.filter_org_names.split(',') if name.strip()]
+    
     try:
-        sync = OrgSyncFromIDC()
+        sync = OrgSyncFromIDC(filter_org_names=filter_org_names)
         sync.run()
     except KeyboardInterrupt:
         logger.info("\n用户中断同步")

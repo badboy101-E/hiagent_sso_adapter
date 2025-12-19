@@ -27,19 +27,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def debug_organizations():
-    """调试组织数据提取"""
+def debug_organizations(max_users=1000):
+    """
+    调试组织数据提取
+    
+    Args:
+        max_users: 最大处理用户数量，默认1000
+    """
     logger.info("=" * 50)
-    logger.info("开始调试组织数据提取")
+    logger.info(f"开始调试组织数据提取（限制：{max_users}个用户）")
     logger.info("=" * 50)
     
     try:
         sync = OrgSyncFromIDC()
         
-        # 1. 获取用户数据
-        logger.info("\n[步骤1] 获取用户数据...")
-        users = sync.get_all_users_from_idc()
-        logger.info(f"获取到 {len(users)} 个用户")
+        # 1. 获取用户数据（限制数量）
+        logger.info(f"\n[步骤1] 获取用户数据（最多{max_users}个）...")
+        all_users = sync.get_all_users_from_idc()
+        
+        # 限制用户数量
+        if len(all_users) > max_users:
+            users = all_users[:max_users]
+            logger.info(f"获取到 {len(all_users)} 个用户，限制为前 {max_users} 个用户进行调试")
+        else:
+            users = all_users
+            logger.info(f"获取到 {len(users)} 个用户")
         
         if not users:
             logger.error("没有用户数据，无法提取组织信息")
@@ -80,14 +92,54 @@ def debug_organizations():
                 if not main_org:
                     users_without_org += 1
         
-        logger.info(f"\n统计（前10个用户）:")
+        logger.info(f"\n统计（前{check_count}个用户）:")
         logger.info(f"  有组织信息的用户: {users_with_org}")
         logger.info(f"  无组织信息的用户: {users_without_org}")
         
-        # 3. 提取组织信息
-        logger.info("\n[步骤3] 提取组织信息...")
-        organizations = sync.get_organizations_from_idc()
-        logger.info(f"提取到 {len(organizations)} 个组织")
+        # 3. 从限制的用户中提取组织信息
+        logger.info(f"\n[步骤3] 从 {len(users)} 个用户中提取组织信息...")
+        
+        # 手动提取组织信息（使用限制后的用户列表）
+        organizations = []
+        org_set = set()
+        
+        for user in users:
+            # 提取主组织信息
+            main_org = get_attr(user, 'mainOrg')
+            if main_org:
+                org_id = str(get_attr(main_org, 'orgId') or get_attr(main_org, 'sourceOrgId') or '')
+                org_name = str(get_attr(main_org, 'orgName') or '')
+                if org_id:
+                    org_key = (org_id, org_name, '')
+                    if org_key not in org_set:
+                        org_set.add(org_key)
+                        organizations.append({
+                            'id': org_id,
+                            'name': org_name or org_id,
+                            'orgName': org_name,
+                            'org_code': org_id,
+                            'pid': ''
+                        })
+            
+            # 提取orgList中的所有组织信息
+            org_list = get_attr(user, 'orgList') or []
+            if isinstance(org_list, list):
+                for org in org_list:
+                    org_id = str(get_attr(org, 'orgId') or get_attr(org, 'sourceOrgId') or '')
+                    org_name = str(get_attr(org, 'orgName') or '')
+                    if org_id:
+                        org_key = (org_id, org_name, '')
+                        if org_key not in org_set:
+                            org_set.add(org_key)
+                            organizations.append({
+                                'id': org_id,
+                                'name': org_name or org_id,
+                                'orgName': org_name,
+                                'org_code': org_id,
+                                'pid': ''
+                            })
+        
+        logger.info(f"从 {len(users)} 个用户中提取到 {len(organizations)} 个组织")
         
         if organizations:
             logger.info("\n前5个组织信息:")
@@ -149,8 +201,20 @@ def debug_organizations():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='调试组织数据提取脚本')
+    parser.add_argument(
+        '--max-users',
+        type=int,
+        default=1000,
+        help='最大处理用户数量（默认：1000）'
+    )
+    
+    args = parser.parse_args()
+    
     try:
-        debug_organizations()
+        debug_organizations(max_users=args.max_users)
     except KeyboardInterrupt:
         logger.info("\n用户中断调试")
         sys.exit(1)

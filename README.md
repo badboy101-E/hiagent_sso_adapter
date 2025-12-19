@@ -171,7 +171,6 @@ crontab -e
 
 ## 参考文档
 
-- [云大组织架构同步.md](./云大组织架构同步.md)
 - [组织架构同步对接指南.md](./组织架构同步对接指南.md)
 - [cqhyxk SDK文档](https://pypi.org/project/cqhyxk/)
 - [身份中台V2.0 OpenAPI接口文档](https://github.com/liudonghua123/cqhyxk/blob/main/docs/cqhyxk_OpenAPI_v2.4.md) - **官方API文档，包含详细的接口说明和字段定义**

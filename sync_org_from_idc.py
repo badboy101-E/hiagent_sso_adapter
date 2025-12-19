@@ -38,6 +38,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_attr(obj, attr_name, default=None):
+    """
+    安全获取对象属性，支持对象和字典
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(attr_name, default)
+    return getattr(obj, attr_name, default)
+
+
+def get_value(obj, default=None):
+    """
+    获取值，如果是枚举类型则获取其值
+    """
+    if obj is None:
+        return default
+    if hasattr(obj, 'value'):  # 枚举类型
+        return obj.value
+    return obj
+
+
 class OrgSyncFromIDC:
     """从身份中台同步组织架构信息到临时数据库"""
     
@@ -104,11 +126,12 @@ class OrgSyncFromIDC:
                     break
                 
                 # 根据API文档，响应结构：data.page（分页信息）、data.content（查询结果数组）
-                page_info = response.data.get('page') or {}
-                total_count = page_info.get('total', 0)
+                # API返回的是对象，不是字典
+                page_info = get_attr(response.data, 'page')
+                total_count = get_attr(page_info, 'total', 0) if page_info else 0
                 
                 # 获取用户列表
-                page_users = response.data.get('content') or []
+                page_users = get_attr(response.data, 'content') or []
                 
                 if not page_users:
                     break
@@ -234,15 +257,16 @@ class OrgSyncFromIDC:
             for user_data in users:
                 try:
                     # 解析用户数据（根据API文档：/open-api/member/identity/page）
+                    # API返回的是IdentityInfo对象，不是字典
                     # API返回字段：sourceUserId（学工号）、name（姓名）、mobile（手机号）、status（身份状态）
-                    user_id = str(user_data.get('sourceUserId') or user_data.get('userId') or user_data.get('id') or '')
-                    user_name = user_data.get('sourceUserId') or user_data.get('userName') or user_data.get('username') or user_data.get('user_name') or ''
-                    display_name = user_data.get('name') or user_data.get('displayName') or user_data.get('display_name') or user_name
-                    email = user_data.get('email') or user_data.get('mail') or ''
-                    mobile = user_data.get('mobile') or user_data.get('phone') or user_data.get('telephone') or ''
+                    user_id = str(get_attr(user_data, 'sourceUserId') or get_attr(user_data, 'userId') or get_attr(user_data, 'id') or '')
+                    user_name = str(get_attr(user_data, 'sourceUserId') or get_attr(user_data, 'userName') or get_attr(user_data, 'username') or '')
+                    display_name = str(get_attr(user_data, 'name') or get_attr(user_data, 'displayName') or user_name)
+                    email = str(get_attr(user_data, 'email') or get_attr(user_data, 'mail') or '')
+                    mobile = str(get_attr(user_data, 'mobile') or get_attr(user_data, 'phone') or get_attr(user_data, 'telephone') or '')
                     # status: 1=正常, 2=数据源删除, 3=身份中台删除, 4=禁用, 5=失效, 6=回收站人员
-                    # 只有status=1才是正常状态
-                    api_status = user_data.get('status', 1)
+                    # status可能是枚举类型，需要获取其value
+                    api_status = get_value(get_attr(user_data, 'status', 1))
                     status = 1 if api_status == 1 else 0  # 只有正常状态才启用
                     
                     if not user_id or not user_name:
@@ -332,11 +356,11 @@ class OrgSyncFromIDC:
                 # API返回：orgList（所属组织信息数组）和 mainOrg（主组织）
                 # orgList内字段：orgId（组织编码）、orgName（组织名称）、sourceOrgId（组织原编码）
                 
-                # 提取主组织信息
-                main_org = user.get('mainOrg')
+                # 提取主组织信息（mainOrg是MainOrgInfo对象）
+                main_org = get_attr(user, 'mainOrg')
                 if main_org:
-                    org_id = main_org.get('orgId') or main_org.get('sourceOrgId') or ''
-                    org_name = main_org.get('orgName') or ''
+                    org_id = str(get_attr(main_org, 'orgId') or get_attr(main_org, 'sourceOrgId') or '')
+                    org_name = str(get_attr(main_org, 'orgName') or '')
                     if org_id:
                         org_key = (org_id, org_name, '')  # 主组织暂时没有父组织ID
                         if org_key not in org_set:
@@ -348,12 +372,12 @@ class OrgSyncFromIDC:
                                 'pid': ''  # 主组织的父组织ID需要从其他接口获取
                             })
                 
-                # 提取orgList中的所有组织信息
-                org_list = user.get('orgList') or []
+                # 提取orgList中的所有组织信息（orgList是OrgInfo对象列表）
+                org_list = get_attr(user, 'orgList') or []
                 if isinstance(org_list, list):
                     for org in org_list:
-                        org_id = org.get('orgId') or org.get('sourceOrgId') or ''
-                        org_name = org.get('orgName') or ''
+                        org_id = str(get_attr(org, 'orgId') or get_attr(org, 'sourceOrgId') or '')
+                        org_name = str(get_attr(org, 'orgName') or '')
                         if org_id:
                             org_key = (org_id, org_name, '')  # orgList中的组织暂时没有父组织ID
                             if org_key not in org_set:
@@ -454,8 +478,8 @@ class OrgSyncFromIDC:
             
             for user_data in users:
                 try:
-                    # 根据API文档，用户ID是sourceUserId
-                    user_id = str(user_data.get('sourceUserId') or user_data.get('userId') or user_data.get('id') or '')
+                    # 根据API文档，用户ID是sourceUserId（IdentityInfo对象）
+                    user_id = str(get_attr(user_data, 'sourceUserId') or get_attr(user_data, 'userId') or get_attr(user_data, 'id') or '')
                     
                     if not user_id:
                         continue
@@ -463,18 +487,18 @@ class OrgSyncFromIDC:
                     # 收集用户的所有组织ID（包括主组织和orgList中的所有组织）
                     org_ids = set()
                     
-                    # 添加主组织
-                    main_org = user_data.get('mainOrg')
+                    # 添加主组织（mainOrg是MainOrgInfo对象）
+                    main_org = get_attr(user_data, 'mainOrg')
                     if main_org:
-                        org_id = main_org.get('orgId') or main_org.get('sourceOrgId')
+                        org_id = get_attr(main_org, 'orgId') or get_attr(main_org, 'sourceOrgId')
                         if org_id:
                             org_ids.add(str(org_id))
                     
-                    # 添加orgList中的所有组织
-                    org_list = user_data.get('orgList') or []
+                    # 添加orgList中的所有组织（orgList是OrgInfo对象列表）
+                    org_list = get_attr(user_data, 'orgList') or []
                     if isinstance(org_list, list):
                         for org in org_list:
-                            org_id = org.get('orgId') or org.get('sourceOrgId')
+                            org_id = get_attr(org, 'orgId') or get_attr(org, 'sourceOrgId')
                             if org_id:
                                 org_ids.add(str(org_id))
                     
@@ -579,7 +603,7 @@ class OrgSyncFromIDC:
             # 2. 同步用户
             logger.info("\n[2/5] 同步用户到临时表...")
             self.sync_users(users)
-            active_user_ids = [str(u.get('userId') or u.get('id') or '') for u in users if u.get('userId') or u.get('id')]
+            active_user_ids = [str(get_attr(u, 'sourceUserId') or get_attr(u, 'userId') or get_attr(u, 'id') or '') for u in users if get_attr(u, 'sourceUserId') or get_attr(u, 'userId') or get_attr(u, 'id')]
             
             # 3. 获取组织架构信息
             logger.info("\n[3/5] 从身份中台获取组织架构信息...")
@@ -588,7 +612,7 @@ class OrgSyncFromIDC:
             # 4. 同步组织
             logger.info("\n[4/5] 同步组织到临时表...")
             self.sync_organizations(organizations)
-            active_org_ids = [str(o.get('id') or '') for o in organizations if o.get('id')]
+            active_org_ids = [str(get_attr(o, 'id', '') or '') for o in organizations if get_attr(o, 'id')]
             
             # 5. 同步用户-组织关系
             logger.info("\n[5/5] 同步用户-组织关系到临时表...")

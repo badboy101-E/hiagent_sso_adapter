@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 导入主同步脚本的类和函数
-from sync_org_from_idc import OrgSyncFromIDC, get_attr
+from sync_org_from_idc import OrgSyncFromIDC, get_attr, get_value
 
 # 配置日志
 logging.basicConfig(
@@ -25,6 +25,113 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class DebugOrgSync(OrgSyncFromIDC):
+    """调试用的同步类，限制用户数量"""
+    
+    def __init__(self, max_users=1000):
+        """初始化，设置最大用户数"""
+        super().__init__()
+        self.max_users = max_users
+        logger.info(f"调试模式：最多处理 {self.max_users} 个用户")
+    
+    def get_all_users_from_idc(self):
+        """
+        重写父类方法，限制获取的用户数量
+        """
+        users = []
+        page_size = 100  # 每页大小
+        current_page = 0
+        
+        logger.info(f"开始从身份中台获取用户信息（限制：{self.max_users}个）...")
+        
+        # 方案1: 不传 sourceUserId，直接分页获取用户
+        logger.info("方案1: 不传 sourceUserId，直接分页获取用户...")
+        try:
+            from cqhyxk.models import IdentityPageRequest
+            
+            while len(users) < self.max_users:
+                # 计算本页需要获取的数量
+                remaining = self.max_users - len(users)
+                current_page_size = min(page_size, remaining)
+                
+                request = IdentityPageRequest(
+                    current=current_page,
+                    size=current_page_size
+                )
+                
+                response = self.idc_client.get_identity_list(request)
+                
+                if not response or not response.data:
+                    break
+                
+                # 获取分页信息
+                page_info = get_attr(response.data, 'page')
+                total_count = get_attr(page_info, 'total', 0) if page_info else 0
+                
+                # 获取用户列表
+                page_users = get_attr(response.data, 'content') or []
+                
+                if not page_users:
+                    break
+                
+                # 只添加需要的数量
+                remaining = self.max_users - len(users)
+                if remaining > 0:
+                    users.extend(page_users[:remaining])
+                
+                logger.info(f"已获取 {len(users)}/{min(self.max_users, total_count) if total_count > 0 else self.max_users} 个用户（第 {current_page + 1} 页，本页 {len(page_users)} 条）...")
+                
+                # 如果已经获取了足够的用户或没有更多数据
+                if len(users) >= self.max_users or len(page_users) < page_size:
+                    break
+                
+                current_page += 1
+            
+            if users:
+                logger.info(f"方案1成功！总共获取到 {len(users)} 个用户（限制：{self.max_users}）")
+                return users
+            else:
+                logger.warning("方案1未获取到数据，尝试其他方案...")
+        except Exception as e:
+            logger.warning(f"方案1失败: {e}")
+            logger.info("尝试使用示例用户ID进行测试...")
+        
+        # 方案2: 使用示例用户ID进行测试（如果方案1失败）
+        sample_user_id = os.getenv('SAMPLE_USER_ID')
+        if sample_user_id:
+            logger.warning("方案2: 使用示例用户ID进行测试（仅返回单个用户）...")
+            try:
+                from cqhyxk.models import IdentityPageRequest
+                request = IdentityPageRequest(
+                    current=0,
+                    size=1,
+                    sourceUserId=sample_user_id
+                )
+                response = self.idc_client.get_identity_list(request)
+                if response and response.data:
+                    page_users = get_attr(response.data, 'content') or []
+                    if page_users:
+                        users = page_users[:1]  # 只取1个用户
+                        logger.warning(f"方案2: 使用示例用户ID获取到 {len(users)} 个用户（仅用于测试）")
+                        return users
+            except Exception as e:
+                logger.error(f"方案2也失败: {e}")
+        
+        # 所有方案都失败
+        error_msg = f"""
+无法获取用户信息！可能的原因：
+1. API必须传 sourceUserId 参数，且未配置用户ID列表
+2. 需要先调用其他API获取用户ID列表
+3. 需要联系身份中台提供批量查询所有用户的API
+
+建议解决方案：
+1. 在 .env 文件中配置 USER_ID_LIST，格式：USER_ID_LIST=user1,user2,user3
+2. 或者联系身份中台确认是否有直接获取所有用户的API
+        """
+        logger.error(error_msg)
+        raise Exception("无法获取用户信息，请检查配置或联系身份中台确认API使用方式")
 
 
 def debug_organizations(max_users=1000):
@@ -39,19 +146,12 @@ def debug_organizations(max_users=1000):
     logger.info("=" * 50)
     
     try:
-        sync = OrgSyncFromIDC()
+        sync = DebugOrgSync(max_users=max_users)
         
-        # 1. 获取用户数据（限制数量）
+        # 1. 获取用户数据（已限制数量）
         logger.info(f"\n[步骤1] 获取用户数据（最多{max_users}个）...")
-        all_users = sync.get_all_users_from_idc()
-        
-        # 限制用户数量
-        if len(all_users) > max_users:
-            users = all_users[:max_users]
-            logger.info(f"获取到 {len(all_users)} 个用户，限制为前 {max_users} 个用户进行调试")
-        else:
-            users = all_users
-            logger.info(f"获取到 {len(users)} 个用户")
+        users = sync.get_all_users_from_idc()
+        logger.info(f"实际获取到 {len(users)} 个用户")
         
         if not users:
             logger.error("没有用户数据，无法提取组织信息")

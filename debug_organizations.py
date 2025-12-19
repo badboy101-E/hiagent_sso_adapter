@@ -162,7 +162,8 @@ def debug_organizations(max_users=1000):
         users_with_org = 0
         users_without_org = 0
         
-        for idx, user in enumerate(users[:10], 1):  # 只检查前10个用户
+        check_count = min(10, len(users))  # 检查前10个用户
+        for idx, user in enumerate(users[:check_count], 1):
             user_id = get_attr(user, 'sourceUserId')
             main_org = get_attr(user, 'mainOrg')
             org_list = get_attr(user, 'orgList') or []

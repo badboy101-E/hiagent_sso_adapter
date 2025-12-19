@@ -8,6 +8,7 @@
 import os
 import sys
 import logging
+from typing import List, Dict
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -141,6 +142,71 @@ class TestSync1000Users(OrgSyncFromIDC):
         logger.error(error_msg)
         raise Exception("无法获取用户信息，请检查配置或联系身份中台确认API使用方式")
     
+    def get_organizations_from_idc(self, users: List = None) -> List[Dict]:
+        """
+        重写父类方法，使用已获取的用户列表提取组织信息
+        避免重新获取所有用户
+        """
+        organizations = []
+        
+        logger.info("开始从用户信息中提取组织架构信息...")
+        
+        # 如果没有传入用户列表，使用已获取的用户（通过重写的get_all_users_from_idc）
+        if users is None:
+            users = self.get_all_users_from_idc()
+        
+        if not users:
+            logger.warning("没有用户数据，无法提取组织信息")
+            return organizations
+        
+        logger.info(f"开始从 {len(users)} 个用户中提取组织信息...")
+        org_set = set()
+        processed_count = 0
+        
+        for user in users:
+            processed_count += 1
+            # 提取主组织信息
+            main_org = get_attr(user, 'mainOrg')
+            if main_org:
+                org_id = str(get_attr(main_org, 'orgId') or get_attr(main_org, 'sourceOrgId') or '')
+                org_name = str(get_attr(main_org, 'orgName') or '')
+                if org_id:
+                    org_key = (org_id, org_name, '')
+                    if org_key not in org_set:
+                        org_set.add(org_key)
+                        organizations.append({
+                            'id': org_id,
+                            'name': org_name or org_id,
+                            'orgName': org_name,
+                            'org_code': org_id,
+                            'pid': ''
+                        })
+            
+            # 提取orgList中的所有组织信息
+            org_list = get_attr(user, 'orgList') or []
+            if isinstance(org_list, list):
+                for org in org_list:
+                    org_id = str(get_attr(org, 'orgId') or get_attr(org, 'sourceOrgId') or '')
+                    org_name = str(get_attr(org, 'orgName') or '')
+                    if org_id:
+                        org_key = (org_id, org_name, '')
+                        if org_key not in org_set:
+                            org_set.add(org_key)
+                            organizations.append({
+                                'id': org_id,
+                                'name': org_name or org_id,
+                                'orgName': org_name,
+                                'org_code': org_id,
+                                'pid': ''
+                            })
+            
+            # 每处理100个用户输出一次进度
+            if processed_count % 100 == 0:
+                logger.info(f"已处理 {processed_count}/{len(users)} 个用户，提取到 {len(organizations)} 个组织...")
+        
+        logger.info(f"从 {len(users)} 个用户信息中提取到 {len(organizations)} 个组织")
+        return organizations
+    
     def run(self):
         """执行测试同步流程"""
         logger.info("=" * 50)
@@ -164,14 +230,45 @@ class TestSync1000Users(OrgSyncFromIDC):
             active_user_ids = [str(get_attr(u, 'sourceUserId') or get_attr(u, 'userId') or get_attr(u, 'id') or '') 
                              for u in users if get_attr(u, 'sourceUserId') or get_attr(u, 'userId') or get_attr(u, 'id')]
             
-            # 3. 获取组织架构信息
+            # 3. 获取组织架构信息（使用已获取的用户列表）
             logger.info("\n[3/5] 从用户信息中提取组织架构信息...")
-            organizations = self.get_organizations_from_idc()
+            organizations = self.get_organizations_from_idc(users=users)
+            
+            if not organizations:
+                logger.warning("未提取到任何组织信息！")
+            else:
+                logger.info(f"提取到 {len(organizations)} 个组织，前5个组织：")
+                for idx, org in enumerate(organizations[:5], 1):
+                    logger.info(f"  组织{idx}: {org}")
             
             # 4. 同步组织
             logger.info("\n[4/5] 同步组织到临时表...")
-            self.sync_organizations(organizations)
-            active_org_ids = [str(get_attr(o, 'id', '') or '') for o in organizations if get_attr(o, 'id')]
+            if organizations:
+                self.sync_organizations(organizations)
+                
+                # 验证组织是否成功写入数据库
+                logger.info("\n[验证] 检查组织数据是否成功写入数据库...")
+                try:
+                    conn = self.get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM tmp_organization WHERE tenant_id = %s", (self.tenant_id,))
+                    db_count = cur.fetchone()[0]
+                    cur.close()
+                    conn.close()
+                    logger.info(f"数据库中实际有 {db_count} 条组织记录（租户ID: {self.tenant_id}）")
+                    if db_count == 0:
+                        logger.error("警告：组织数据未成功写入数据库！请检查日志了解详情。")
+                    elif db_count < len(organizations):
+                        logger.warning(f"警告：预期写入 {len(organizations)} 条组织记录，但数据库中只有 {db_count} 条。")
+                    else:
+                        logger.info("✓ 组织数据已成功写入数据库")
+                except Exception as e:
+                    logger.error(f"验证组织数据写入失败: {e}", exc_info=True)
+            else:
+                logger.warning("没有组织数据需要同步")
+            
+            active_org_ids = [str(org.get('id', '') if isinstance(org, dict) else get_attr(org, 'id') or '') 
+                            for org in organizations if org]
             
             # 5. 同步用户-组织关系
             logger.info("\n[5/5] 同步用户-组织关系到临时表...")
